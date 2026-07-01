@@ -1,5 +1,5 @@
 // ==========================================
-// 京东 WSKEY & Cookie → 青龙（QX 完全兼容版）
+// 京东 WSKEY & Cookie → 青龙（QX/Surge 双兼容版）
 // ==========================================
 
 const QL_URL = 'http://192.168.100.190:5700';  // ← 改成你的青龙地址
@@ -7,32 +7,81 @@ const QL_CLIENT_ID = 'XvlGPHERmo1-';           // ← 改成你的 CLIENT_ID
 const QL_CLIENT_SECRET = 'd8-pKcFXf3FJsvcp9zNlnc-v';  // ← 改成你的 CLIENT_SECRET
 
 // ======================
-// 存储（QX 用 $prefs）
+// 环境检测
+// ======================
+const isSurge = typeof $httpClient != "undefined";
+const isQuanX = typeof $task != "undefined";
+
+// ======================
+// 兼容层 - 存储
 // ======================
 const S = {
-    get: k => { try { return $prefs.valueForKey(k); } catch { return null; } },
-    set: (k, v) => { try { $prefs.setValueForKey(String(v), k); } catch {} }
+    get: k => {
+        if (isQuanX) {
+            try { return $prefs.valueForKey(k); } catch { return null; }
+        }
+        if (isSurge) {
+            try { return $persistentStore.read(k); } catch { return null; }
+        }
+        return null;
+    },
+    set: (k, v) => {
+        if (isQuanX) {
+            try { $prefs.setValueForKey(String(v), k); } catch {}
+        } else if (isSurge) {
+            try { $persistentStore.write(String(v), k); } catch {}
+        }
+    }
 };
 
 // ======================
-// 日志
-// ======================
-const log = (...args) => console.log('[JD]', ...args);
-
-// ======================
-// 通知（QX 用 $notify）
+// 兼容层 - 通知
 // ======================
 function notify(type, title, subtitle, body) {
     const key = `JD_NOTIFY_${type}`;
     const last = parseInt(S.get(key) || '0');
     if (Date.now() - last > 30000) {
         S.set(key, Date.now());
-        $notify(title, subtitle || '', body || '');
+        if (isQuanX) {
+            $notify(title, subtitle || '', body || '');
+        } else if (isSurge) {
+            $notification.post(title, subtitle || '', body || '');
+        }
         log('NOTIFY:', type, title);
     } else {
         log('NOTIFY SKIP:', type);
     }
 }
+
+// ======================
+// 兼容层 - HTTP 请求
+// ======================
+function httpRequest(options, callback) {
+    if (isQuanX) {
+        if (typeof options == "string") options = { url: options };
+        $task.fetch(options).then(
+            response => callback(null, response, response.body),
+            reason => callback(reason.error || 'error', null, null)
+        );
+    } else if (isSurge) {
+        $httpClient[options.method.toLowerCase()](options, (error, response, body) => {
+            callback(error, response, body);
+        });
+    }
+}
+
+// ======================
+// 兼容层 - done
+// ======================
+function done() {
+    if (isQuanX) $done({});
+    else if (isSurge) $done();
+}
+
+// ======================
+// 日志
+// ======================
+const log = (...args) => console.log('[JD]', ...args);
 
 // ======================
 // 解析请求
@@ -42,10 +91,11 @@ const headers = $request.headers || {};
 const cookie = (headers.Cookie || headers.cookie || '').toString();
 
 log('URL:', url.substring(0, 60));
+log('ENV:', isQuanX ? 'QX' : (isSurge ? 'Surge' : 'Unknown'));
 
 if (!cookie) {
     log('NO COOKIE');
-    $done({});
+    done();
     return;
 }
 
@@ -109,7 +159,7 @@ if (isWskeyRequest) {
     } else {
         notify('WSKEY_SAVE', '🟡 WSKEY 已保存', '账号: ' + pinDecoded, '等待 Cookie 请求后同步');
     }
-    $done({});
+    done();
     return;
 }
 
@@ -118,7 +168,7 @@ if (isWskeyRequest) {
 // ======================
 if (!isCookieRequest) {
     log('Not cookie request');
-    $done({});
+    done();
     return;
 }
 
@@ -135,7 +185,7 @@ log('needSyncWskey:', needSyncWskey);
 
 if (!savedPin) {
     log('NO PIN');
-    $done({});
+    done();
     return;
 }
 
@@ -155,7 +205,7 @@ if (ptKey && pin) {
 
 if (tasks.length === 0) {
     log('No tasks');
-    $done({});
+    done();
     return;
 }
 
@@ -170,7 +220,7 @@ const lastLock = parseInt(S.get(LOCK_KEY) || '0');
 
 if (!needSyncWskey && (now - lastLock < 30000)) {
     log('LOCKED for', savedPin, ':', now - lastLock, 'ms ago');
-    $done({});
+    done();
     return;
 }
 S.set(LOCK_KEY, now);
@@ -178,7 +228,7 @@ S.set(LOCK_KEY, now);
 notify('START', '🚀 京东同步启动', '账号: ' + pinDecoded, '同步 ' + tasks.map(t => t.name).join(' + ') + ' 到青龙');
 
 // ======================
-// TOKEN（QX 用 $task.fetch）
+// TOKEN
 // ======================
 function getToken(cb, retries = 0) {
     const MAX_RETRIES = 2;
@@ -187,26 +237,28 @@ function getToken(cb, retries = 0) {
     const tokenUrl = QL_URL + '/open/auth/token?client_id=' + encodeURIComponent(QL_CLIENT_ID) + 
                 '&client_secret=' + encodeURIComponent(QL_CLIENT_SECRET);
     
-    $task.fetch({ url: tokenUrl, method: 'GET' }).then(response => {
-        try {
-            const j = JSON.parse(response.body);
-            const token = j.data?.token || null;
-            if (token) {
-                log('Token OK');
-                cb(token);
-            } else {
-                throw new Error('No token');
+    httpRequest({ url: tokenUrl, method: 'GET' }, function(err, res, body) {
+        if (!err && body) {
+            try {
+                const j = JSON.parse(body);
+                const token = j.data?.token || null;
+                if (token) {
+                    log('Token OK');
+                    cb(token);
+                    return;
+                }
+            } catch (parseErr) {
+                log('Token parse error');
+                cb(null);
+                return;
             }
-        } catch (parseErr) {
-            log('Token parse error');
-            cb(null);
         }
-    }, reason => {
-        log('Token fetch error:', reason.error || reason);
+
         if (retries < MAX_RETRIES) {
             log('Token retry', retries + 1);
             setTimeout(() => getToken(cb, retries + 1), RETRY_DELAY);
         } else {
+            log('Token failed after retries');
             notify('FAIL_TOKEN', '❌ Token 失败', '青龙登录失败', '');
             cb(null);
         }
@@ -214,35 +266,31 @@ function getToken(cb, retries = 0) {
 }
 
 // ======================
-// 查找 ENV（QX 用 $task.fetch）
+// 查找 ENV
 // ======================
 function findEnv(token, name, matchPin, cb) {
     const searchUrl = QL_URL + '/open/envs?searchValue=' + encodeURIComponent(name) + '&t=' + Date.now();
-    $task.fetch({ 
+    httpRequest({ 
         url: searchUrl, 
         method: 'GET',
         headers: { Authorization: 'Bearer ' + token }
-    }).then(response => {
+    }, function(err, res, body) {
+        if (err || !body) { log('Search failed'); cb(null); return; }
         try {
-            const list = JSON.parse(response.body).data || [];
+            const list = JSON.parse(body).data || [];
             const env = list.find(x => x.name === name && x.value && x.value.includes(matchPin));
             log('ENV', name, env ? 'FOUND' : 'NEW');
             cb(env || null);
-        } catch {
-            cb(null);
-        }
-    }, () => {
-        log('Search failed');
-        cb(null);
+        } catch { cb(null); }
     });
 }
 
 // ======================
-// 启用 ENV（QX 用 $task.fetch）
+// 启用 ENV
 // ======================
 function enableEnv(token, id) {
     if (!id) return;
-    $task.fetch({
+    httpRequest({
         url: QL_URL + '/open/envs/enable?t=' + Date.now(),
         method: 'PUT',
         headers: { 
@@ -250,15 +298,13 @@ function enableEnv(token, id) {
             'Content-Type': 'application/json'
         },
         body: JSON.stringify([id])
-    }).then(() => {
-        log('Enable', id, 'ok');
-    }, () => {
-        log('Enable', id, 'failed');
+    }, function(err, res, body) {
+        log('Enable', id, body || err || 'ok');
     });
 }
 
 // ======================
-// 同步单个（QX 用 $task.fetch）
+// 同步单个
 // ======================
 function syncOne(token, task, done) {
     findEnv(token, task.name, savedPin, function(env) {
@@ -270,7 +316,7 @@ function syncOne(token, task, done) {
         const doRequest = function(cb) {
             if (env && env.id) {
                 log('UPDATE', task.name);
-                $task.fetch({
+                httpRequest({
                     url: QL_URL + '/open/envs?t=' + Date.now(),
                     method: 'PUT',
                     headers: reqHeaders,
@@ -280,10 +326,10 @@ function syncOne(token, task, done) {
                         value: task.value, 
                         remarks: savedPin 
                     })
-                }).then(response => cb(null, response, response.body), reason => cb(reason.error || 'error', null, null));
+                }, cb);
             } else {
                 log('CREATE', task.name);
-                $task.fetch({
+                httpRequest({
                     url: QL_URL + '/open/envs?t=' + Date.now(),
                     method: 'POST',
                     headers: reqHeaders,
@@ -292,7 +338,7 @@ function syncOne(token, task, done) {
                         value: task.value, 
                         remarks: savedPin 
                     }])
-                }).then(response => cb(null, response, response.body), reason => cb(reason.error || 'error', null, null));
+                }, cb);
             }
         };
 
@@ -342,7 +388,7 @@ function syncOne(token, task, done) {
 getToken(function(token) {
     if (!token) {
         log('NO TOKEN');
-        $done({});
+        done();
         return;
     }
 
@@ -352,7 +398,7 @@ getToken(function(token) {
     function next() {
         if (i >= tasks.length) {
             log('All done');
-            $done({});
+            done();
             return;
         }
         syncOne(token, tasks[i++], next);
