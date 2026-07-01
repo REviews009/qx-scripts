@@ -1,5 +1,5 @@
 // ==========================================
-// QX 版：京东 WSKEY & Cookie → 青龙
+// QX 版：京东 WSKEY & Cookie → 青龙（修复版）
 // ==========================================
 
 const QL_URL = "http://192.168.100.190:5700";
@@ -121,7 +121,7 @@ async function syncToQL(pt_pin, wskey, cookie) {
   
   // 同步 JD_WSCK
   if (wskey) {
-    let wsckValue = `pin=${encodeURIComponent(pt_pin)};wskey=${wskey};`;
+    let wsckValue = `pin=${pt_pin};wskey=${wskey};`;
     let env = await findEnv(token, "JD_WSCK", pt_pin);
     
     if (env) {
@@ -194,7 +194,7 @@ async function syncToQL(pt_pin, wskey, cookie) {
     // ---------- cookie 请求：同步 ----------
     if (req.type === "cookie") {
       let pt_pin = req.pt_pin;
-      let pinKey = pt_pin; // 用 pt_pin 作为 key
+      let pinKey = pt_pin;
       
       // 读取该账号存储的 wskey
       let savedWskey = S.get(`JD_WSKEY_${pinKey}`);
@@ -217,11 +217,11 @@ async function syncToQL(pt_pin, wskey, cookie) {
       
       // 如果有新 wskey 需要同步
       if (savedWskey && needSync) {
-        tasks.push({ name: "JD_WSCK", value: `pin=${encodeURIComponent(savedPin || pt_pin)};wskey=${savedWskey};` });
+        tasks.push({ name: "JD_WSCK", value: `pin=${savedPin || pt_pin};wskey=${savedWskey};` });
       }
       
-      // cookie 总是同步
-      let cookieValue = `pt_key=${req.pt_key};pt_pin=${encodeURIComponent(pt_pin)};`;
+      // cookie 总是同步（修复：去掉 encodeURIComponent）
+      let cookieValue = `pt_key=${req.pt_key};pt_pin=${pt_pin};`;
       tasks.push({ name: "JD_COOKIE", value: cookieValue });
       
       if (tasks.length === 0) {
