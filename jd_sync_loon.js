@@ -90,7 +90,11 @@ if (isWskeyRequest) {
     let isFirstTime = !oldWskey;
     let isChanged = oldWskey && oldWskey !== wskey;
     
-    // 【重点】重新登录：清除同步标记
+    // 保存当前 WSKEY
+    S.set('JD_WSKEY_' + pin, wskey);
+    S.set('JD_PIN_' + pin, pin);
+    
+    // 【重点】重新登录：清除同步标记，触发同步
     if (isChanged) {
         log('WSKEY CHANGED for', pinDecoded);
         S.set('JD_WSKEY_SYNCED_' + pin, '0');
@@ -99,10 +103,6 @@ if (isWskeyRequest) {
         log('WSKEY FIRST TIME for', pinDecoded);
         notify('WSKEY', '🔐 WSKEY 已捕获', '账号: ' + pinDecoded, '首次登录，等待 Cookie 完整同步');
     }
-    
-    // 保存当前 WSKEY
-    S.set('JD_WSKEY_' + pin, wskey);
-    S.set('JD_PIN_' + pin, pin);
     
     $done({});
     return;
@@ -139,7 +139,7 @@ if (!syncPin || !syncPtKey) {
 // ======================
 const tasks = [];
 
-// 【关键】WSKEY 同步条件：有 WSKEY 且 (未同步过 或 已变更)
+// 【关键】WSKEY 同步条件：有 WSKEY 且 未同步过
 const wskeyNotSynced = S.get('JD_WSKEY_SYNCED_' + syncPin) !== '1';
 let willSyncWskey = false;
 
@@ -177,9 +177,9 @@ if (tasks.length === 0) {
 const LOCK_KEY = 'JD_SYNC_LOCK_' + syncPin;
 const now = Date.now();
 const lastLock = parseInt(S.get(LOCK_KEY) || '0');
-const isWskeyChanged = S.get('JD_WSKEY_SYNCED_' + syncPin) === '0';
 
-if (!isWskeyChanged && (now - lastLock < 60000)) {
+// 只有当 WSKEY 未同步时，才忽略锁
+if (!willSyncWskey && (now - lastLock < 60000)) {
     log('LOCKED for', syncPin, ':', ((now - lastLock) / 1000).toFixed(1), 's ago');
     $done({});
     return;
@@ -369,8 +369,10 @@ getToken(function(token) {
     function next() {
         if (i >= tasks.length) {
             log('All done');
-            // 【完成通知】
-            notify('DONE', '✅ 全部同步完成', '账号: ' + pinDecoded2, '现在可以在青龙中使用了');
+            // 【完成通知】只在有任务时弹
+            if (tasks.length > 0) {
+                notify('DONE', '✅ 全部同步完成', '账号: ' + pinDecoded2, '现在可以在青龙中使用了');
+            }
             setTimeout(() => $done({}), 300);
             return;
         }
