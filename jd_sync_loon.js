@@ -102,9 +102,23 @@ if (ptKey && pin) {
 }
 
 // ======================
-// wskey 请求：只保存，不同步
+// 【关键】sh.jd.com 请求：保存 wskey + 直接同步（无需等 pt_key）
 // ======================
-if (isWskeyRequest) {
+if (isWskeyRequest && url.includes('sh.jd.com')) {
+    log('SH.JD.COM request: save + sync');
+    if (wskeyChanged) {
+        notify('WSKEY_SAVE', '🟡 WSKEY 已更新', '账号: ' + pinDecoded, '新 WSKEY 已保存，立即同步');
+    } else {
+        notify('WSKEY_SAVE', '🟡 WSKEY 已保存', '账号: ' + pinDecoded, '立即同步到青龙');
+    }
+    // 直接跳到同步逻辑，不 return
+    // 继续执行下面的同步代码
+}
+
+// ======================
+// wskey 请求（api.m.jd.com）：只保存，不同步
+// ======================
+else if (isWskeyRequest) {
     log('WSKEY request: save only');
     if (wskeyChanged) {
         notify('WSKEY_SAVE', '🟡 WSKEY 已更新', '账号: ' + pinDecoded, '新 WSKEY 已保存，等待 Cookie 请求同步');
@@ -118,14 +132,14 @@ if (isWskeyRequest) {
 // ======================
 // 不是 cookie 请求：结束
 // ======================
-if (!isCookieRequest) {
+if (!isCookieRequest && !url.includes('sh.jd.com')) {
     log('Not cookie request');
     $done({});
     return;
 }
 
 // ======================
-// cookie 请求：同步 wskey + cookie
+// cookie 请求 / sh.jd.com 请求：同步 wskey + cookie
 // ======================
 const savedWskey = S.get('JD_WSKEY_TEMP');
 const savedPin = pin || S.get('JD_PIN_TEMP') || '';
