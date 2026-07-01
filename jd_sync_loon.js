@@ -1,5 +1,5 @@
 // ==========================================
-// 京东 WSKEY & Cookie → 青龙（简洁版）
+// 京东 WSKEY & Cookie → 青龙（防重复通知 + 修复 WSKEY 同步版 + Token重试）
 // ==========================================
 
 const QL_URL = 'http://192.168.100.190:5700';
@@ -20,15 +20,22 @@ const S = {
 const log = (...args) => console.log('[JD]', ...args);
 
 // ======================
-// 通知
+// 通知（带冷却）
 // ======================
-function notify(title, subtitle, body) {
-    $notification.post(title, subtitle || '', body || '');
-    log('NOTIFY:', title);
+function notify(type, title, subtitle, body) {
+    const key = `JD_NOTIFY_${type}`;
+    const last = parseInt(S.get(key) || '0');
+    if (Date.now() - last > 30000) {  // 30秒冷却
+        S.set(key, Date.now());
+        $notification.post(title, subtitle || '', body || '');
+        log('NOTIFY:', type, title);
+    } else {
+        log('NOTIFY SKIP:', type);
+    }
 }
 
 // ======================
-// 解析请求
+// 解析请求（先解析，不受锁影响）
 // ======================
 const url = $request.url || '';
 const headers = $request.headers || {};
@@ -42,6 +49,9 @@ if (!cookie) {
     return;
 }
 
+// ======================
+// 提取字段
+// ======================
 let pin = (cookie.match(/pin=([^;]+)/) || [])[1] || '';
 let wskey = (cookie.match(/wskey=([^;]+)/) || [])[1] || '';
 let ptKey = (cookie.match(/pt_key=([^;]+)/) || [])[1] || '';
@@ -50,41 +60,63 @@ log('pin:', pin ? 'YES' : 'NO');
 log('wskey:', wskey ? 'YES' : 'NO');
 log('ptKey:', ptKey ? 'YES' : 'NO');
 
+// 解码 pin
 let pinDecoded = pin;
 try { if (pin) pinDecoded = decodeURIComponent(pin); } catch (e) {}
 
-const isWskeyRequest = url.includes('api.m.jd.com') && !!wskey;
+// ======================
+// 判断请求类型
+// ======================
+const isWskeyRequest = (url.includes('api.m.jd.com') || url.includes('sh.jd.com')) && !!wskey;
 const isCookieRequest = url.includes('mars.jd.com') && !!pin && !!ptKey;
 
 log('isWskey:', isWskeyRequest);
 log('isCookie:', isCookieRequest);
 
 // ======================
-// 【WSKEY 请求】捕获 + 标记变更
+// 【关键】保存数据（移到锁之前！不受锁影响）
+// ======================
+let wskeyChanged = false;
+
+if (pin) {
+    S.set('JD_PIN_TEMP', pin);
+    log('PIN saved');
+}
+
+if (wskey) {
+    const oldWskey = S.get('JD_WSKEY_TEMP');
+    if (oldWskey && oldWskey !== wskey) {
+        log('WSKEY CHANGED! old:', oldWskey.substring(0, 20) + '...', 'new:', wskey.substring(0, 20) + '...');
+        wskeyChanged = true;
+        // 标记 wskey 已变更，需要重新同步
+        S.set('JD_WSKEY_NEED_SYNC', '1');
+    }
+    S.set('JD_WSKEY_TEMP', wskey);
+    S.set('JD_WSKEY_TIME', Date.now());
+    log('WSKEY saved');
+}
+
+if (ptKey && pin) {
+    S.set('JD_COOKIE_TEMP', `pt_key=${ptKey};pt_pin=${pin};`);
+    log('COOKIE saved');
+}
+
+// ======================
+// wskey 请求：只保存，不同步
 // ======================
 if (isWskeyRequest) {
-    const oldWskey = S.get('JD_WSKEY_' + pin);
-    
-    if (!oldWskey) {
-        log('WSKEY FIRST TIME for', pinDecoded);
-        notify('🔐 首次捕获 WSKEY', pinDecoded, '等待 Cookie 完整同步...');
-    } else if (oldWskey !== wskey) {
-        log('WSKEY CHANGED for', pinDecoded);
-        notify('🔐 检测到新登录', pinDecoded, '准备重新同步...');
-        // 【关键】标记为需要同步
-        S.set('JD_WSKEY_NEED_SYNC_' + pin, '1');
+    log('WSKEY request: save only');
+    if (wskeyChanged) {
+        notify('WSKEY_SAVE', '🟡 WSKEY 已更新', '账号: ' + pinDecoded, '新 WSKEY 已保存，等待 Cookie 请求同步');
+    } else {
+        notify('WSKEY_SAVE', '🟡 WSKEY 已保存', '账号: ' + pinDecoded, '等待 Cookie 请求后同步');
     }
-    
-    // 保存 WSKEY
-    S.set('JD_WSKEY_' + pin, wskey);
-    S.set('JD_PIN_' + pin, pinDecoded);
-    
     $done({});
     return;
 }
 
 // ======================
-// 【非 Cookie 请求】结束
+// 不是 cookie 请求：结束
 // ======================
 if (!isCookieRequest) {
     log('Not cookie request');
@@ -93,57 +125,38 @@ if (!isCookieRequest) {
 }
 
 // ======================
-// 【Cookie 请求】准备同步
+// cookie 请求：同步 wskey + cookie
 // ======================
-log('COOKIE REQUEST:', pin);
+const savedWskey = S.get('JD_WSKEY_TEMP');
+const savedPin = pin || S.get('JD_PIN_TEMP') || '';
+const needSyncWskey = S.get('JD_WSKEY_NEED_SYNC') === '1';
 
-if (!pin || !ptKey) {
-    log('MISSING DATA');
+log('savedWskey:', savedWskey ? 'YES' : 'NO');
+log('savedPin:', savedPin);
+log('needSyncWskey:', needSyncWskey);
+
+if (!savedPin) {
+    log('NO PIN');
     $done({});
     return;
 }
 
-// 【防重复】60秒内只同步一次
-const SYNC_KEY = 'JD_SYNC_TIME_' + pin;
-const lastSyncTime = parseInt(S.get(SYNC_KEY) || '0');
-const now = Date.now();
-
-if (now - lastSyncTime < 60000) {
-    log('SKIP: Synced', ((now - lastSyncTime) / 1000).toFixed(1), 's ago');
-    $done({});
-    return;
-}
-
-// 更新同步时间
-S.set(SYNC_KEY, now);
-
-// ======================
 // 构建任务
-// ======================
 const tasks = [];
 
-// 检查 WSKEY 是否需要同步
-const needWskeySync = S.get('JD_WSKEY_NEED_SYNC_' + pin) === '1';
-const savedWskey = S.get('JD_WSKEY_' + pin);
-
-if (savedWskey && needWskeySync) {
-    tasks.push({
-        name: 'JD_WSCK',
-        value: `pin=${pin};wskey=${savedWskey};`,
-        pin: pin,
-        type: 'wskey'
-    });
-    log('TASK: JD_WSCK');
+// 【关键】如果有新 wskey 需要同步，或者没有同步过，就加入任务
+if (savedWskey && needSyncWskey) {
+    tasks.push({ name: 'JD_WSCK', value: `pin=${savedPin};wskey=${savedWskey};` });
+    log('TASK: JD_WSCK (new/changed)');
+} else if (savedWskey) {
+    // wskey 已经同步过，但这次 cookie 请求也带上（确保青龙里是最新的）
+    tasks.push({ name: 'JD_WSCK', value: `pin=${savedPin};wskey=${savedWskey};` });
+    log('TASK: JD_WSCK (existing)');
 }
 
-// Cookie 总是同步
-tasks.push({
-    name: 'JD_COOKIE',
-    value: `pt_key=${ptKey};pt_pin=${pin};`,
-    pin: pin,
-    type: 'cookie'
-});
-log('TASK: JD_COOKIE');
+if (ptKey && pin) {
+    tasks.push({ name: 'JD_COOKIE', value: `pt_key=${ptKey};pt_pin=${pin};` });
+}
 
 if (tasks.length === 0) {
     log('No tasks');
@@ -151,34 +164,71 @@ if (tasks.length === 0) {
     return;
 }
 
-// ======================
-// 启动通知
-// ======================
-const taskDesc = tasks.map(t => t.name).join(' + ');
-notify('🚀 开始同步', pinDecoded, taskDesc);
+log('Tasks:', tasks.map(t => t.name).join(', '));
 
 // ======================
-// TOKEN（10秒超时）
+// 【关键】执行锁（只锁同步，不锁保存）
 // ======================
-function getToken(cb) {
-    const tokenUrl = QL_URL + '/open/auth/token?client_id=' + encodeURIComponent(QL_CLIENT_ID) + '&client_secret=' + encodeURIComponent(QL_CLIENT_SECRET);
-    const tid = setTimeout(() => {
-        log('Token timeout');
-        cb(null);
-    }, 10000);
+const LOCK_KEY = 'JD_SYNC_LOCK_' + savedPin;  // 按账号锁，不是全局锁
+const now = Date.now();
+const lastLock = parseInt(S.get(LOCK_KEY) || '0');
+
+// 如果 wskey 变了，强制突破锁同步；否则正常检查锁
+if (!needSyncWskey && (now - lastLock < 30000)) {
+    log('LOCKED for', savedPin, ':', now - lastLock, 'ms ago');
+    $done({});
+    return;
+}
+S.set(LOCK_KEY, now);
+
+// 只弹一次启动通知
+notify('START', '🚀 京东同步启动', '账号: ' + pinDecoded, '同步 ' + tasks.map(t => t.name).join(' + ') + ' 到青龙');
+
+// ======================
+// TOKEN（带重试机制）
+// ======================
+function getToken(cb, retries = 0) {
+    const MAX_RETRIES = 2;
+    const RETRY_DELAY = 1000;  // 1秒延迟
     
-    $httpClient.get(tokenUrl, function (err, res, body) {
-        clearTimeout(tid);
-        if (err || !body) {
-            log('Token error:', err);
-            cb(null);
-            return;
+    const url = QL_URL + '/open/auth/token?client_id=' + encodeURIComponent(QL_CLIENT_ID) + 
+                '&client_secret=' + encodeURIComponent(QL_CLIENT_SECRET);
+    
+    $httpClient.get(url, function (err, res, body) {
+        // 成功获取响应
+        if (!err && body) {
+            try {
+                const j = JSON.parse(body);
+                const token = j.data?.token || null;
+                
+                if (token) {
+                    log('Token OK (retry: ' + retries + ')');
+                    cb(token);
+                    return;
+                } else {
+                    // 响应解析但无 token，可能是无效凭证
+                    throw new Error('No token in response: ' + (j.message || JSON.stringify(j)));
+                }
+            } catch (parseErr) {
+                log('Token parse error:', parseErr.message);
+                // 解析错误，不重试（说明响应格式完全错误）
+                cb(null);
+                return;
+            }
         }
-        try {
-            const j = JSON.parse(body);
-            cb(j.data?.token || null);
-        } catch (e) {
-            log('Token parse error:', e);
+
+        // 网络错误或无响应，尝试重试
+        if (retries < MAX_RETRIES) {
+            log('Token failed, retry ' + (retries + 1) + '/' + MAX_RETRIES + 
+                ', delay ' + RETRY_DELAY + 'ms', err ? err.message || err : 'empty body');
+            
+            setTimeout(function() {
+                getToken(cb, retries + 1);
+            }, RETRY_DELAY);
+        } else {
+            // 重试次数用尽
+            log('Token failed after ' + MAX_RETRIES + ' retries');
+            notify('FAIL_TOKEN', '❌ Token 失败', '青龙登录失败，已重试 ' + MAX_RETRIES + ' 次', '');
             cb(null);
         }
     });
@@ -187,28 +237,16 @@ function getToken(cb) {
 // ======================
 // 查找 ENV
 // ======================
-function findEnv(token, name, pin, cb) {
-    const searchUrl = QL_URL + '/open/envs?searchValue=' + encodeURIComponent(name);
-    $httpClient.get({
-        url: searchUrl,
-        headers: { Authorization: 'Bearer ' + token }
-    }, function (err, res, body) {
-        if (err || !body) {
-            log('Search error');
-            cb(null);
-            return;
-        }
+function findEnv(token, name, matchPin, cb) {
+    const url = QL_URL + '/open/envs?searchValue=' + encodeURIComponent(name) + '&t=' + Date.now();
+    $httpClient.get({ url, headers: { Authorization: 'Bearer ' + token } }, function (err, res, body) {
+        if (err || !body) { log('Search failed'); cb(null); return; }
         try {
             const list = JSON.parse(body).data || [];
-            let env = list.find(x => x.name === name && x.remarks === pin);
-            if (!env) {
-                env = list.find(x => x.name === name && x.value && x.value.includes(pin));
-            }
+            const env = list.find(x => x.name === name && x.value && x.value.includes(matchPin));
+            log('ENV', name, env ? 'FOUND' : 'NEW');
             cb(env || null);
-        } catch (e) {
-            log('Search parse error');
-            cb(null);
-        }
+        } catch { cb(null); }
     });
 }
 
@@ -218,81 +256,75 @@ function findEnv(token, name, pin, cb) {
 function enableEnv(token, id) {
     if (!id) return;
     $httpClient.put({
-        url: QL_URL + '/open/envs/enable',
-        headers: {
-            Authorization: 'Bearer ' + token,
-            'Content-Type': 'application/json'
-        },
+        url: QL_URL + '/open/envs/enable?t=' + Date.now(),
+        headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
         body: JSON.stringify([id])
-    }, function(err) {
-        if (!err) log('Enable OK:', id);
+    }, function(err, res, body) {
+        log('Enable', id, body || err || 'ok');
     });
 }
 
 // ======================
-// 同步单个任务
+// 同步单个
 // ======================
 function syncOne(token, task, done) {
-    findEnv(token, task.name, task.pin, function(env) {
-        const headers = {
-            Authorization: 'Bearer ' + token,
-            'Content-Type': 'application/json'
+    findEnv(token, task.name, savedPin, function(env) {
+        const reqHeaders = { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' };
+
+        const doRequest = function(cb) {
+            if (env && env.id) {
+                log('UPDATE', task.name);
+                $httpClient.put({
+                    url: QL_URL + '/open/envs?t=' + Date.now(),
+                    headers: reqHeaders,
+                    body: JSON.stringify({ id: env.id, name: task.name, value: task.value, remarks: savedPin })
+                }, cb);
+            } else {
+                log('CREATE', task.name);
+                $httpClient.post({
+                    url: QL_URL + '/open/envs?t=' + Date.now(),
+                    headers: reqHeaders,
+                    body: JSON.stringify([{ name: task.name, value: task.value, remarks: savedPin }])
+                }, cb);
+            }
         };
 
-        const isUpdate = env && env.id;
-        const url = QL_URL + '/open/envs';
-        
-        const body = isUpdate
-            ? JSON.stringify({
-                id: env.id,
-                name: task.name,
-                value: task.value,
-                remarks: task.pin
-            })
-            : JSON.stringify([{
-                name: task.name,
-                value: task.value,
-                remarks: task.pin
-            }]);
-
-        const method = isUpdate ? 'put' : 'post';
-
-        $httpClient[method]({
-            url: url,
-            headers: headers,
-            body: body
-        }, function(err, res, respBody) {
-            if (err || !respBody) {
-                log(task.name, 'FAILED: network error');
-                notify('❌ ' + task.name + ' 失败', pinDecoded, '网络错误');
+        doRequest(function(err, res, body) {
+            if (err || !body) {
+                log(task.name, 'failed: network');
+                notify('FAIL_' + task.name, '❌ ' + task.name + ' 失败', '网络错误', '');
                 done();
                 return;
             }
 
-            try {
-                const r = JSON.parse(respBody);
-                if (r.code === 200) {
-                    log(task.name, 'SUCCESS');
-                    
-                    if (task.type === 'wskey') {
-                        notify('✅ WSKEY 已同步', pinDecoded, isUpdate ? '已更新' : '已创建');
-                        S.set('JD_WSKEY_NEED_SYNC_' + task.pin, '0');
-                    } else {
-                        notify('✅ Cookie 已同步', pinDecoded, isUpdate ? '已更新' : '已创建');
-                    }
-                    
-                    if (env && env.id) {
-                        enableEnv(token, env.id);
-                    }
-                } else {
-                    log(task.name, 'FAILED:', r.message);
-                    notify('❌ ' + task.name + ' 失败', pinDecoded, r.message || '未知错误');
-                }
-            } catch (e) {
-                log(task.name, 'FAILED: parse error');
-                notify('❌ ' + task.name + ' 失败', pinDecoded, '青龙响应异常');
+            let r;
+            try { r = JSON.parse(body); } catch {
+                log(task.name, 'failed: parse');
+                notify('FAIL_' + task.name, '❌ ' + task.name + ' 失败', '解析错误', '');
+                done();
+                return;
             }
-            
+
+            if (r.code !== 200) {
+                log(task.name, 'failed:', r.message);
+                notify('FAIL_' + task.name, '❌ ' + task.name + ' 失败', r.message || '', '');
+                done();
+                return;
+            }
+
+            log(task.name, 'success');
+            notify('SUCCESS_' + task.name, '✅ ' + task.name + ' 成功', '账号: ' + pinDecoded, env ? '已更新青龙' : '首次写入青龙');
+
+            // 【关键】wskey 同步成功后，清除需要同步的标记
+            if (task.name === 'JD_WSCK') {
+                S.set('JD_WSKEY_NEED_SYNC', '0');
+                log('WSKEY sync flag cleared');
+            }
+
+            if (env && env.id) {
+                enableEnv(token, env.id);
+            }
+
             done();
         });
     });
@@ -304,7 +336,6 @@ function syncOne(token, task, done) {
 getToken(function(token) {
     if (!token) {
         log('NO TOKEN');
-        notify('❌ 登录失败', '青龙', 'Token 获取失败，请检查配置');
         $done({});
         return;
     }
@@ -314,9 +345,8 @@ getToken(function(token) {
     let i = 0;
     function next() {
         if (i >= tasks.length) {
-            log('All tasks done');
-            notify('✅ 全部同步完成', pinDecoded, '可在青龙中使用');
-            setTimeout(() => $done({}), 200);
+            log('All done');
+            $done({});
             return;
         }
         syncOne(token, tasks[i++], next);
