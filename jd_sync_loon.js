@@ -336,8 +336,9 @@ function syncOne(token, task, done) {
             // 【进度通知】根据任务类型弹窗
             if (task.type === 'wskey') {
                 notify('WSKEY', '✅ WSKEY 已同步', '账号: ' + pinDecoded2, env ? '更新到青龙' : '首次添加到青龙');
-                // 标记已同步
+                // 【修复】只在成功后才标记为已同步
                 S.set('JD_WSKEY_SYNCED_' + task.pin, '1');
+                log('WSKEY sync marked as done');
             } else if (task.type === 'cookie') {
                 notify('COOKIE', '✅ Cookie 已同步', '账号: ' + pinDecoded2, env ? '更新到青龙' : '首次添加到青龙');
             }
