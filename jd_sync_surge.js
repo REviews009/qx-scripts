@@ -1,5 +1,5 @@
 // ==========================================
-// 京东 WSKEY & Cookie → 青龙（防重复通知 + 修复 WSKEY 同步版）
+// 京东 WSKEY & Cookie → 青龙（防重复通知 + 修复 WSKEY 同步版 + Token重试）
 // ==========================================
 
 const QL_URL = 'http://192.168.100.190:5700';
@@ -185,16 +185,52 @@ S.set(LOCK_KEY, now);
 notify('START', '🚀 京东同步启动', '账号: ' + pinDecoded, '同步 ' + tasks.map(t => t.name).join(' + ') + ' 到青龙');
 
 // ======================
-// TOKEN
+// TOKEN（带重试机制）
 // ======================
-function getToken(cb) {
-    const url = QL_URL + '/open/auth/token?client_id=' + encodeURIComponent(QL_CLIENT_ID) + '&client_secret=' + encodeURIComponent(QL_CLIENT_SECRET);
+function getToken(cb, retries = 0) {
+    const MAX_RETRIES = 2;
+    const RETRY_DELAY = 1000;  // 1秒延迟
+    
+    const url = QL_URL + '/open/auth/token?client_id=' + encodeURIComponent(QL_CLIENT_ID) + 
+                '&client_secret=' + encodeURIComponent(QL_CLIENT_SECRET);
+    
     $httpClient.get(url, function (err, res, body) {
-        if (err || !body) { log('Token failed'); cb(null); return; }
-        try {
-            const j = JSON.parse(body);
-            cb(j.data?.token || null);
-        } catch { cb(null); }
+        // 成功获取响应
+        if (!err && body) {
+            try {
+                const j = JSON.parse(body);
+                const token = j.data?.token || null;
+                
+                if (token) {
+                    log('Token OK (retry: ' + retries + ')');
+                    cb(token);
+                    return;
+                } else {
+                    // 响应解析但无 token，可能是无效凭证
+                    throw new Error('No token in response: ' + (j.message || JSON.stringify(j)));
+                }
+            } catch (parseErr) {
+                log('Token parse error:', parseErr.message);
+                // 解析错误，不重试（说明响应格式完全错误）
+                cb(null);
+                return;
+            }
+        }
+
+        // 网络错误或无响应，尝试重试
+        if (retries < MAX_RETRIES) {
+            log('Token failed, retry ' + (retries + 1) + '/' + MAX_RETRIES + 
+                ', delay ' + RETRY_DELAY + 'ms', err ? err.message || err : 'empty body');
+            
+            setTimeout(function() {
+                getToken(cb, retries + 1);
+            }, RETRY_DELAY);
+        } else {
+            // 重试次数用尽
+            log('Token failed after ' + MAX_RETRIES + ' retries');
+            notify('FAIL_TOKEN', '❌ Token 失败', '青龙登录失败，已重试 ' + MAX_RETRIES + ' 次', '');
+            cb(null);
+        }
     });
 }
 
@@ -300,7 +336,6 @@ function syncOne(token, task, done) {
 getToken(function(token) {
     if (!token) {
         log('NO TOKEN');
-        notify('FAIL_TOKEN', '❌ Token失败', '青龙登录失败', '');
         $done({});
         return;
     }
