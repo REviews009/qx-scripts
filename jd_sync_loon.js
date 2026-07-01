@@ -182,14 +182,7 @@ if (!needSyncWskey && (now - lastLock < 30000)) {
 S.set(LOCK_KEY, now);
 
 // 只弹一次启动通知
-const START_NOTIFIED_KEY = 'JD_START_NOTIFIED_' + savedPin;
-if (!S.get(START_NOTIFIED_KEY)) {
-    S.set(START_NOTIFIED_KEY, '1');
-    $notification.post('🚀 京东同步启动', '账号: ' + pinDecoded, '同步 ' + tasks.map(t => t.name).join(' + ') + ' 到青龙');
-    log('NOTIFY: START (first time)');
-} else {
-    log('NOTIFY SKIP: START (already notified)');
-}
+notify('START', '🚀 京东同步启动', '账号: ' + pinDecoded, '同步 ' + tasks.map(t => t.name).join(' + ') + ' 到青龙');
 
 // ======================
 // TOKEN（带重试机制）
