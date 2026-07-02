@@ -3,8 +3,8 @@
 // ==========================================
 
 const QL_URL = 'http://qinglong.qzz.io';
-const QL_CLIENT_ID = 'XvlGPHERmo1-';
-const QL_CLIENT_SECRET = 'd8-pKcFXf3FJsvcp9zNlnc-v';
+const QL_CLIENT_ID = 'Y57RsFPVBbz-';
+const QL_CLIENT_SECRET = 'UmUwXTnVE0qM1_pLCRNCfvdA';
 
 // ======================
 // 存储
