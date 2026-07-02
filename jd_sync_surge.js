@@ -2,27 +2,9 @@
 // 京东 WSKEY & Cookie → 青龙（防重复通知 + 修复 WSKEY 同步版 + Token重试）
 // ==========================================
 
-// ======================
-// 从 Surge 模块参数读取配置
-// ======================
-const args = typeof $argument !== 'undefined' ? Object.fromEntries(
-    $argument.split('&').map(kv => {
-        const [k, v] = kv.split('=');
-        return [decodeURIComponent(k), decodeURIComponent(v || '')];
-    })
-) : {};
-
-const QL_URL = args.ql_url || '';
-const QL_CLIENT_ID = args.ql_client_id || '';
-const QL_CLIENT_SECRET = args.ql_client_secret || '';
-
-// 参数校验
-if (!QL_URL || !QL_CLIENT_ID || !QL_CLIENT_SECRET) {
-    console.log('[JD] ❌ 错误：青龙配置缺失，请在 Surge 模块参数中填写');
-    $notification.post('京东同步', '❌ 配置缺失', '请在模块参数中填写青龙连接信息');
-    $done({});
-    return;
-}
+const QL_URL = 'http://qinglong.qzz.io';
+const QL_CLIENT_ID = 'XvlGPHERmo1-';
+const QL_CLIENT_SECRET = 'd8-pKcFXf3FJsvcp9zNlnc-v';
 
 // ======================
 // 存储
