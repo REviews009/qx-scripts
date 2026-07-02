@@ -1,2 +1,2 @@
 # qx-scripts
-自用qx+surge同步青龙脚本
+自用q-x+sur-ge-ql脚本
