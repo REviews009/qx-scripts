@@ -2,7 +2,7 @@
 // 京东 WSKEY & Cookie → 青龙（防重复通知 + 修复 WSKEY 同步版 + Token重试）
 // ==========================================
 
-const QL_URL = 'http://qinglong.qzz.io';
+const QL_URL = 'https://qinglong.qzz.io';
 const QL_CLIENT_ID = 'Y57RsFPVBbz-';
 const QL_CLIENT_SECRET = 'UmUwXTnVE0qM1_pLCRNCfvdA';
 
