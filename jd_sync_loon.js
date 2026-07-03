@@ -2,7 +2,7 @@
 // 京东 WSKEY & Cookie → 青龙（防重复通知 + 修复 WSKEY 同步版 + Token重试）
 // ==========================================
 
-const QL_URL = 'http://192.168.100.190:5700';
+const QL_URL = 'https://www.u3866327.nyat.app:55582';
 const QL_CLIENT_ID = 'XvlGPHERmo1-';
 const QL_CLIENT_SECRET = 'd8-pKcFXf3FJsvcp9zNlnc-v';
 
