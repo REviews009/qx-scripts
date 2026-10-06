@@ -1,5 +1,12 @@
 // ==========================================
-
+// JD wskey + cookie 同步青龙
+// 【本次修改】
+// 1. 去掉域名限制：请求 cookie 里只要有 pin + pt_key 就触发同步
+//    （原逻辑必须等到 mars.jd.com 的请求才同步，而 App 流量几乎都是
+//     api.m.jd.com，导致 pt_key 永远等不到同步 → cookie 从不更新）
+// 2. wskey 早退分支改为"只有当前请求里没有 pt_key 时才只保存不同步"
+// 3. findEnv 同时按编码/解码两种 pin 匹配旧变量，避免重复创建
+// 4. 保存 wskey 时记录所属 pin，防止多账号时把 A 的 wskey 配到 B 的 pin 上
 // ==========================================
 
 const QL_URL = 'https://qinglong.qzz.io';
@@ -66,15 +73,18 @@ try { if (pin) pinDecoded = decodeURIComponent(pin); } catch (e) {}
 
 // ======================
 // 判断请求类型
+// 【修改】不再限定域名：
+//   - cookie 里有 wskey → wskey 数据
+//   - cookie 里同时有 pin + pt_key → 可触发同步
 // ======================
-const isWskeyRequest = url.includes('api.m.jd.com') && !!wskey;
-const isCookieRequest = url.includes('mars.jd.com') && !!pin && !!ptKey;
+const isWskeyRequest = !!wskey;
+const isCookieRequest = !!pin && !!ptKey;
 
 log('isWskey:', isWskeyRequest);
 log('isCookie:', isCookieRequest);
 
 // ======================
-// 【关键】保存数据（移到锁之前！不受锁影响）
+// 保存数据（在锁之前，不受锁影响）
 // ======================
 let wskeyChanged = false;
 
@@ -92,6 +102,7 @@ if (wskey) {
         S.set('JD_WSKEY_NEED_SYNC', '1');
     }
     S.set('JD_WSKEY_TEMP', wskey);
+    S.set('JD_WSKEY_PIN', pin || S.get('JD_PIN_TEMP') || '');  // 【新增】记录 wskey 所属账号
     S.set('JD_WSKEY_TIME', Date.now());
     log('WSKEY saved');
 }
@@ -102,36 +113,39 @@ if (ptKey && pin) {
 }
 
 // ======================
-// wskey 请求：只保存，不同步
+// 【修改】只有 wskey、没有 pt_key 的请求：只保存，不同步
+// （原来只要命中 api.m.jd.com 就直接返回，即使该请求同时带了 pt_key 也不同步）
 // ======================
-if (isWskeyRequest) {
-    log('WSKEY request: save only');
+if (isWskeyRequest && !isCookieRequest) {
+    log('WSKEY request: save only (no pt_key in this request)');
     if (wskeyChanged) {
-        notify('WSKEY_SAVE', '🟡 WSKEY 已更新', '账号: ' + pinDecoded, '新 WSKEY 已保存，等待 Cookie 请求同步');
+        notify('WSKEY_SAVE', '🟡 WSKEY 已更新', '账号: ' + pinDecoded, '新 WSKEY 已保存，等待带 pt_key 的请求触发同步');
     } else {
-        notify('WSKEY_SAVE', '🟡 WSKEY 已保存', '账号: ' + pinDecoded, '等待 Cookie 请求后同步');
+        notify('WSKEY_SAVE', '🟡 WSKEY 已保存', '账号: ' + pinDecoded, '等待带 pt_key 的请求触发同步');
     }
     $done({});
     return;
 }
 
 // ======================
-// 不是 cookie 请求：结束
+// 没有 pin + pt_key：结束
 // ======================
 if (!isCookieRequest) {
-    log('Not cookie request');
+    log('Not syncable (no pin + pt_key)');
     $done({});
     return;
 }
 
 // ======================
-// cookie 请求：同步 wskey + cookie
+// 带 pin + pt_key 的请求：同步 wskey + cookie
 // ======================
 const savedWskey = S.get('JD_WSKEY_TEMP');
+const savedWskeyPin = S.get('JD_WSKEY_PIN') || '';
 const savedPin = pin || S.get('JD_PIN_TEMP') || '';
 const needSyncWskey = S.get('JD_WSKEY_NEED_SYNC') === '1';
 
 log('savedWskey:', savedWskey ? 'YES' : 'NO');
+log('savedWskeyPin:', savedWskeyPin || '(unknown)');
 log('savedPin:', savedPin);
 log('needSyncWskey:', needSyncWskey);
 
@@ -144,18 +158,17 @@ if (!savedPin) {
 // 构建任务
 const tasks = [];
 
-// 【关键】如果有新 wskey 需要同步，或者没有同步过，就加入任务
-if (savedWskey && needSyncWskey) {
+// 【修改】wskey 只有所属账号匹配时才同步，避免多账号串号
+if (savedWskey && (!savedWskeyPin || savedWskeyPin === savedPin)) {
     tasks.push({ name: 'JD_WSCK', value: `pin=${savedPin};wskey=${savedWskey};` });
-    log('TASK: JD_WSCK (new/changed)');
+    log('TASK: JD_WSCK' + (needSyncWskey ? ' (new/changed)' : ' (existing)'));
 } else if (savedWskey) {
-    // wskey 已经同步过，但这次 cookie 请求也带上（确保青龙里是最新的）
-    tasks.push({ name: 'JD_WSCK', value: `pin=${savedPin};wskey=${savedWskey};` });
-    log('TASK: JD_WSCK (existing)');
+    log('WSKEY belongs to another pin, skip JD_WSCK');
 }
 
 if (ptKey && pin) {
     tasks.push({ name: 'JD_COOKIE', value: `pt_key=${ptKey};pt_pin=${pin};` });
+    log('TASK: JD_COOKIE');
 }
 
 if (tasks.length === 0) {
@@ -167,13 +180,12 @@ if (tasks.length === 0) {
 log('Tasks:', tasks.map(t => t.name).join(', '));
 
 // ======================
-// 【关键】执行锁（只锁同步，不锁保存）
+// 执行锁（只锁同步，不锁保存；按账号锁，wskey 变更时可强制突破）
 // ======================
-const LOCK_KEY = 'JD_SYNC_LOCK_' + savedPin;  // 按账号锁，不是全局锁
+const LOCK_KEY = 'JD_SYNC_LOCK_' + savedPin;
 const now = Date.now();
 const lastLock = parseInt(S.get(LOCK_KEY) || '0');
 
-// 如果 wskey 变了，强制突破锁同步；否则正常检查锁
 if (!needSyncWskey && (now - lastLock < 30000)) {
     log('LOCKED for', savedPin, ':', now - lastLock, 'ms ago');
     $done({});
@@ -190,28 +202,25 @@ notify('START', '🚀 京东同步启动', '账号: ' + pinDecoded, '同步 ' + 
 function getToken(cb, retries = 0) {
     const MAX_RETRIES = 2;
     const RETRY_DELAY = 1000;  // 1秒延迟
-    
-    const url = QL_URL + '/open/auth/token?client_id=' + encodeURIComponent(QL_CLIENT_ID) + 
-                '&client_secret=' + encodeURIComponent(QL_CLIENT_SECRET);
-    
-    $httpClient.get(url, function (err, res, body) {
-        // 成功获取响应
+
+    const tokenUrl = QL_URL + '/open/auth/token?client_id=' + encodeURIComponent(QL_CLIENT_ID) +
+                     '&client_secret=' + encodeURIComponent(QL_CLIENT_SECRET);
+
+    $httpClient.get(tokenUrl, function (err, res, body) {
         if (!err && body) {
             try {
                 const j = JSON.parse(body);
                 const token = j.data?.token || null;
-                
+
                 if (token) {
                     log('Token OK (retry: ' + retries + ')');
                     cb(token);
                     return;
                 } else {
-                    // 响应解析但无 token，可能是无效凭证
                     throw new Error('No token in response: ' + (j.message || JSON.stringify(j)));
                 }
             } catch (parseErr) {
                 log('Token parse error:', parseErr.message);
-                // 解析错误，不重试（说明响应格式完全错误）
                 cb(null);
                 return;
             }
@@ -219,14 +228,13 @@ function getToken(cb, retries = 0) {
 
         // 网络错误或无响应，尝试重试
         if (retries < MAX_RETRIES) {
-            log('Token failed, retry ' + (retries + 1) + '/' + MAX_RETRIES + 
+            log('Token failed, retry ' + (retries + 1) + '/' + MAX_RETRIES +
                 ', delay ' + RETRY_DELAY + 'ms', err ? err.message || err : 'empty body');
-            
-            setTimeout(function() {
+
+            setTimeout(function () {
                 getToken(cb, retries + 1);
             }, RETRY_DELAY);
         } else {
-            // 重试次数用尽
             log('Token failed after ' + MAX_RETRIES + ' retries');
             notify('FAIL_TOKEN', '❌ Token 失败', '青龙登录失败，已重试 ' + MAX_RETRIES + ' 次', '');
             cb(null);
@@ -238,13 +246,20 @@ function getToken(cb, retries = 0) {
 // 查找 ENV
 // ======================
 function findEnv(token, name, matchPin, cb) {
-    const url = QL_URL + '/open/envs?searchValue=' + encodeURIComponent(name) + '&t=' + Date.now();
-    $httpClient.get({ url, headers: { Authorization: 'Bearer ' + token } }, function (err, res, body) {
+    // 【修改】同时匹配编码/解码两种 pin，避免因编码差异找不到旧变量而重复创建
+    const pins = [matchPin];
+    try {
+        const d = decodeURIComponent(matchPin);
+        if (d && d !== matchPin) pins.push(d);
+    } catch (e) {}
+
+    const searchUrl = QL_URL + '/open/envs?searchValue=' + encodeURIComponent(name) + '&t=' + Date.now();
+    $httpClient.get({ url: searchUrl, headers: { Authorization: 'Bearer ' + token } }, function (err, res, body) {
         if (err || !body) { log('Search failed'); cb(null); return; }
         try {
             const list = JSON.parse(body).data || [];
-            const env = list.find(x => x.name === name && x.value && x.value.includes(matchPin));
-            log('ENV', name, env ? 'FOUND' : 'NEW');
+            const env = list.find(x => x.name === name && x.value && pins.some(p => x.value.includes(p)));
+            log('ENV', name, env ? 'FOUND (id:' + env.id + ')' : 'NEW');
             cb(env || null);
         } catch { cb(null); }
     });
@@ -259,7 +274,7 @@ function enableEnv(token, id) {
         url: QL_URL + '/open/envs/enable?t=' + Date.now(),
         headers: { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' },
         body: JSON.stringify([id])
-    }, function(err, res, body) {
+    }, function (err, res, body) {
         log('Enable', id, body || err || 'ok');
     });
 }
@@ -268,10 +283,10 @@ function enableEnv(token, id) {
 // 同步单个
 // ======================
 function syncOne(token, task, done) {
-    findEnv(token, task.name, savedPin, function(env) {
+    findEnv(token, task.name, savedPin, function (env) {
         const reqHeaders = { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' };
 
-        const doRequest = function(cb) {
+        const doRequest = function (cb) {
             if (env && env.id) {
                 log('UPDATE', task.name);
                 $httpClient.put({
@@ -289,7 +304,7 @@ function syncOne(token, task, done) {
             }
         };
 
-        doRequest(function(err, res, body) {
+        doRequest(function (err, res, body) {
             if (err || !body) {
                 log(task.name, 'failed: network');
                 notify('FAIL_' + task.name, '❌ ' + task.name + ' 失败', '网络错误', '');
@@ -315,7 +330,7 @@ function syncOne(token, task, done) {
             log(task.name, 'success');
             notify('SUCCESS_' + task.name, '✅ ' + task.name + ' 成功', '账号: ' + pinDecoded, env ? '已更新青龙' : '首次写入青龙');
 
-            // 【关键】wskey 同步成功后，清除需要同步的标记
+            // wskey 同步成功后，清除需要同步的标记
             if (task.name === 'JD_WSCK') {
                 S.set('JD_WSKEY_NEED_SYNC', '0');
                 log('WSKEY sync flag cleared');
@@ -333,7 +348,7 @@ function syncOne(token, task, done) {
 // ======================
 // 主流程
 // ======================
-getToken(function(token) {
+getToken(function (token) {
     if (!token) {
         log('NO TOKEN');
         $done({});
