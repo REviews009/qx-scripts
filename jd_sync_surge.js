@@ -9,7 +9,7 @@
 // 4. 保存 wskey 时记录所属 pin，防止多账号时把 A 的 wskey 配到 B 的 pin 上
 // ==========================================
 
-const QL_URL = 'https://qinglong.qzz.io';
+const QL_URL = 'https://9986.iepose.cn';
 const QL_CLIENT_ID = 'Y57RsFPVBbz-';
 const QL_CLIENT_SECRET = 'UmUwXTnVE0qM1_pLCRNCfvdA';
 
